@@ -1,4 +1,4 @@
-# 🎵 QPlay.js (v4.0.0-MFULL)
+﻿# 🎵 QPlay.js (v5.5.0-MFULL)
 
 Librería multimedia universal, agnóstica y 100% pura en Vanilla JavaScript para la reproducción de audio, video, imágenes y streams adaptativos (HLS / DASH), equipada con un ecualizador Web Audio API de 5 bandas, control de velocidad, modo PiP y captura de snapshots.
 
@@ -17,7 +17,7 @@ Librería multimedia universal, agnóstica y 100% pura en Vanilla JavaScript par
 Puedes integrar **QPlay.js MFULL** directamente en tus páginas web mediante CDN sin necesidad de descargar archivos locales:
 
 ```html
-<script src="[https://cdn.jsdelivr.net/gh/nevisbaez34-creator/QPlay-mfull@main/qplay.mfull.js](https://cdn.jsdelivr.net/gh/nevisbaez34-creator/QPlay-mfull@main/qplay.mfull.js)"></script>
+<script src="https://cdn.jsdelivr.net/gh/nevisbaez34-creator/QPlay-mfull@main/qplay.mfull.js"></script>
 🚀 1. Uso en HTML Puro / Vanilla JavaScript
 Implementación directa utilizando un contenedor <div> y el script de la CDN.
 
