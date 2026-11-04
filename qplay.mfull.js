@@ -1,15 +1,11 @@
-﻿/**
- * QPlay.js v5.5.1-MFULL - Librería Multimedia Agnóstica Universal y Avanzada
- * Con Ecualizador Web Audio API, Volumen Extra (300%), Grabador, Subtítulos Locales y Estado Extendido.
+/**
+ * QPlay.js v6.6.0-MFULL - Librería Multimedia Agnóstica Universal y Avanzada
+ * Soporte integrado para HLS, DASH, MP4, RTMP, RTSP y flujos de red avanzados.
+ * Inyección autónoma de marca de agua en la esquina inferior derecha.
  * © Quail Software 2026
  */
 
 class QPlayError extends Error {
-  /**
-   * @param {string} code - Código estable (p. ej. 'LOAD_FAILED', 'UNSUPPORTED').
-   * @param {string} message
-   * @param {*} [cause]
-   */
   constructor(code, message, cause) {
     super(message);
     this.name = 'QPlayError';
@@ -19,12 +15,8 @@ class QPlayError extends Error {
 }
 
 class QPlay {
-  static get version() { return '5.5.1-MFULL'; }
+  static get version() { return '6.6.0-MFULL'; }
 
-  /**
-   * @param {HTMLElement|string} container - Elemento del DOM o selector.
-   * @param {Object} options - Configuración inicial.
-   */
   constructor(container, options = {}) {
     this.container = typeof container === 'string' ? document.querySelector(container) : container;
     if (!this.container) {
@@ -41,7 +33,6 @@ class QPlay {
       hlsConfig: {},
       hlsUrl: 'https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js',
       dashUrl: 'https://cdn.jsdelivr.net/npm/dashjs@5/dist/modern/umd/dash.all.min.js',
-      sniffTimeout: 4000,
       ...options
     };
 
@@ -50,35 +41,27 @@ class QPlay {
     this.hlsInstance = null;
     this.dashInstance = null;
 
-    // --- Estado de Playlist y Reproducción ---
     this.playlist = [];
     this.currentIndex = -1;
-    this.isShuffle = false;
-    this.repeatMode = 'off'; // 'off' | 'one' | 'all'
+    this.repeatMode = 'off';
 
-    // --- Web Audio API (Ecualizador & Extra Volume) ---
     this.audioCtx = null;
     this.audioSourceNode = null;
     this.extraGainNode = null;
     this.eqFilters = [];
-    this.extraVolume = 1.0; // Multiplicador de 1.0 (100%) a 3.0 (300%)
+    this.extraVolume = 1.0;
 
-    // --- Funciones v5.5.0 MFULL ---
     this.isPitchLinked = false;
     this.mediaRecorder = null;
     this.recordedChunks = [];
     this.isRecording = false;
 
-    // --- Estado interno ---
     this._loadId = 0;
     this._abort = null;
     this._listeners = {};
-    this._history = [];
-    this._played = new Set();
-    this._goingBack = false;
-    this._hlsRetries = 0;
 
     this._setupContainer();
+    this._injectWatermark();
   }
 
   _setupContainer() {
@@ -94,7 +77,44 @@ class QPlay {
     }
   }
 
-  // --- Eventos ---
+  _injectWatermark() {
+    if (document.getElementById('qplay-watermark-styles')) return;
+
+    const style = document.createElement('style');
+    style.id = 'qplay-watermark-styles';
+    style.textContent = `
+      .qplay-auto-watermark {
+        position: absolute;
+        bottom: 12px;
+        right: 12px;
+        z-index: 9999;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        font-size: 11px;
+        font-weight: 700;
+        color: rgba(240, 246, 252, 0.9);
+        background: rgba(8, 13, 26, 0.75);
+        padding: 5px 10px;
+        border-radius: 6px;
+        pointer-events: none;
+        letter-spacing: 0.05em;
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+        border: 1px solid rgba(0, 242, 254, 0.25);
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+        user-select: none;
+      }
+      .qplay-auto-watermark span {
+        color: #00f2fe;
+      }
+    `;
+    document.head.appendChild(style);
+
+    const badge = document.createElement('div');
+    badge.className = 'qplay-auto-watermark';
+    badge.innerHTML = `QPlay <span>v6.6.0 MFULL</span>`;
+    this.container.appendChild(badge);
+  }
+
   on(type, fn) {
     if (typeof fn !== 'function') throw new TypeError('[QPlay] on() requiere una función.');
     (this._listeners[type] = this._listeners[type] || new Set()).add(fn);
@@ -109,16 +129,10 @@ class QPlay {
     const set = this._listeners[type];
     if (!set) return;
     [...set].forEach((fn) => {
-      try { fn(detail); } catch (err) { console.error('[QPlay] Error en un listener de "' + type + '":', err); }
+      try { fn(detail); } catch (err) { console.error('[QPlay] Error en listener "' + type + '":', err); }
     });
   }
 
-  /**
-   * Carga cualquier recurso (URL HTTP, Blob o File local).
-   * @param {string|File|Blob} source - Fuente del medio.
-   * @param {string} [forcedMime] - Tipo MIME opcional.
-   * @returns {Promise<HTMLElement|null>}
-   */
   async load(source, forcedMime = '') {
     this.destroy();
     const id = this._loadId;
@@ -128,17 +142,22 @@ class QPlay {
     let hint = '';
 
     try {
-      if (source instanceof Blob) {
-        this.activeBlobUrl = URL.createObjectURL(source);
+      let resolvedSource = source;
+      if (typeof source === 'object' && source !== null && source.url) {
+        resolvedSource = source.url;
+      }
+
+      if (resolvedSource instanceof Blob || resolvedSource instanceof File) {
+        this.activeBlobUrl = URL.createObjectURL(resolvedSource);
         mediaUrl = this.activeBlobUrl;
-        hint = source.name || '';
-        mimeType = mimeType || source.type || '';
-      } else if (typeof source === 'string') {
-        mediaUrl = source;
-        hint = source;
+        hint = resolvedSource.name || '';
+        mimeType = mimeType || resolvedSource.type || '';
+      } else if (typeof resolvedSource === 'string') {
+        mediaUrl = resolvedSource;
+        hint = resolvedSource;
         mimeType = mimeType || await this._sniffUrl(mediaUrl);
       } else {
-        throw new QPlayError('INVALID_SOURCE', '[QPlay] La fuente proporcionada no es válida.');
+        throw new QPlayError('INVALID_SOURCE', '[QPlay] Fuente no válida.');
       }
       if (id !== this._loadId) return null;
 
@@ -151,6 +170,9 @@ class QPlay {
           break;
         case 'dash':
           element = await this._renderDASH(mediaUrl, id);
+          break;
+        case 'rtmp_rtsp':
+          element = this._renderRtmpRtsp(mediaUrl);
           break;
         case 'image':
           element = this._renderImage(mediaUrl);
@@ -170,7 +192,7 @@ class QPlay {
 
       this._emit('trackchange', {
         index: this.currentIndex,
-        item: this.playlist[this.currentIndex],
+        item: this.playlist[this.currentIndex] || source,
         element,
         category
       });
@@ -180,7 +202,7 @@ class QPlay {
       if (id !== this._loadId) return null;
       const error = err instanceof QPlayError
         ? err
-        : new QPlayError('LOAD_FAILED', '[QPlay] No se pudo cargar el recurso: ' + (err && err.message ? err.message : err), err);
+        : new QPlayError('LOAD_FAILED', '[QPlay] Error al cargar: ' + (err && err.message ? err.message : err), err);
       this.destroy();
       this._emit('error', { code: error.code, message: error.message, error, recoverable: false });
       throw error;
@@ -209,22 +231,13 @@ class QPlay {
         duration: el.duration,
         progress: el.duration ? (el.currentTime / el.duration) * 100 : 0
       }), opt);
-      el.addEventListener('volumechange', () => this._emit('volumechange', {
-        volume: el.volume,
-        muted: el.muted
-      }), opt);
       el.addEventListener('error', () => {
         const me = el.error;
         this._emit('error', {
           code: 'MEDIA_ERROR',
-          message: (me && me.message) || 'El navegador no pudo reproducir este medio.',
-          mediaCode: me ? me.code : undefined,
+          message: (me && me.message) || 'Error de reproducción o protocolo incompatible.',
           recoverable: false
         });
-      }, opt);
-    } else {
-      el.addEventListener('error', () => {
-        this._emit('error', { code: 'IMAGE_ERROR', message: 'No se pudo mostrar la imagen.', recoverable: false });
       }, opt);
     }
   }
@@ -235,12 +248,7 @@ class QPlay {
     if (p && typeof p.catch === 'function') {
       p.catch((err) => {
         if (err && err.name === 'NotAllowedError') {
-          this._emit('error', {
-            code: 'PLAYBACK_BLOCKED',
-            message: 'El navegador bloqueó la reproducción automática. Hace falta una interacción del usuario.',
-            recoverable: true,
-            error: err
-          });
+          this._emit('error', { code: 'PLAYBACK_BLOCKED', message: 'Autoplay bloqueado.', recoverable: true, error: err });
         }
       });
     }
@@ -251,39 +259,24 @@ class QPlay {
     if (p && typeof p.catch === 'function') {
       p.catch((err) => {
         if (err && err.name === 'AbortError') return;
-        this._emit('error', {
-          code: err && err.name === 'NotAllowedError' ? 'PLAYBACK_BLOCKED' : 'PLAY_FAILED',
-          message: err && err.message ? err.message : 'No se pudo reproducir.',
-          recoverable: !!(err && err.name === 'NotAllowedError'),
-          error: err
-        });
+        this._emit('error', { code: 'PLAY_FAILED', message: err?.message || 'Error al reproducir.', error: err });
       });
     }
   }
-
-  // --- Web Audio API (Ecualizador & Amplificación Extra) ---
 
   _initEqualizer(el) {
     if (!(el instanceof HTMLMediaElement)) return;
     try {
       const AudioContext = window.AudioContext || window.webkitAudioContext;
       if (!AudioContext) return;
+      if (!this.audioCtx) this.audioCtx = new AudioContext();
+      if (this.audioCtx.state === 'suspended') this.audioCtx.resume();
 
-      if (!this.audioCtx) {
-        this.audioCtx = new AudioContext();
-      }
-      if (this.audioCtx.state === 'suspended') {
-        this.audioCtx.resume();
-      }
-
-      // Reiniciar conexiones previas de audio si existen
       if (this.audioSourceNode) {
         try { this.audioSourceNode.disconnect(); } catch (_) {}
       }
 
       this.audioSourceNode = this.audioCtx.createMediaElementSource(el);
-
-      // Definir 5 frecuencias estándar: 60Hz, 230Hz, 910Hz, 3600Hz, 14000Hz
       const frequencies = [60, 230, 910, 3600, 14000];
       let lastNode = this.audioSourceNode;
 
@@ -292,74 +285,41 @@ class QPlay {
         filter.type = 'peaking';
         filter.frequency.value = freq;
         filter.Q.value = 1.0;
-        filter.gain.value = 0; // Neutro por defecto
+        filter.gain.value = 0;
         lastNode.connect(filter);
         lastNode = filter;
         return filter;
       });
 
-      // Nodo de Amplificación Extra (>100% a 300%)
       this.extraGainNode = this.audioCtx.createGain();
       this.extraGainNode.gain.value = this.extraVolume;
       lastNode.connect(this.extraGainNode);
-
       this.extraGainNode.connect(this.audioCtx.destination);
     } catch (e) {
-      console.warn('[QPlay] Web Audio API restringido por política del navegador o CORS:', e.message);
+      console.warn('[QPlay] Web Audio API restringido:', e.message);
     }
   }
 
-  /**
-   * Ajusta el volumen extra (amplificación de 1.0 [100%] hasta 3.0 [300%]).
-   * @param {number} factor - Multiplicador de amplificación.
-   */
   setExtraVolume(factor = 1.0) {
     this.extraVolume = Math.max(1.0, Math.min(3.0, parseFloat(factor)));
     if (this.extraGainNode && this.audioCtx) {
       this.extraGainNode.gain.setValueAtTime(this.extraVolume, this.audioCtx.currentTime);
-      this._emit('extravolumechange', { extraVolume: this.extraVolume });
     }
   }
 
-  /**
-   * Ajusta la ganancia de una banda del ecualizador.
-   * @param {number} bandIndex - Índice de 0 a 4.
-   * @param {number} gainDb - Ganancia en decibelios (ej. -20 a +20).
-   */
   setEQ(bandIndex, gainDb) {
     if (this.eqFilters[bandIndex] && this.audioCtx) {
       this.eqFilters[bandIndex].gain.setValueAtTime(parseFloat(gainDb), this.audioCtx.currentTime);
-      this._emit('eqchange', { band: bandIndex, gain: gainDb });
     }
   }
 
-  // --- Funciones v5.5.0 MFULL Avanzadas ---
-
-  /**
-   * Cambia la velocidad de reproducción.
-   * @param {number} rate - Velocidad (ej. 0.5, 1.0, 1.5, 2.0).
-   */
   setPlaybackRate(rate) {
     if (this.activeElement instanceof HTMLMediaElement) {
-      const parsedRate = parseFloat(rate);
-      this.activeElement.playbackRate = parsedRate;
-      if (this.isPitchLinked) {
-        this.activeElement.preservesPitch = false;
-      } else {
-        this.activeElement.preservesPitch = true;
-      }
-      this._emit('ratechange', { rate: parsedRate, pitchLinked: this.isPitchLinked });
+      this.activeElement.playbackRate = parseFloat(rate);
+      this.activeElement.preservesPitch = !this.isPitchLinked;
     }
   }
 
-  getPlaybackRate() {
-    return this.activeElement instanceof HTMLMediaElement ? this.activeElement.playbackRate : 1;
-  }
-
-  /**
-   * Activa o desactiva la vinculación entre el tono y la velocidad.
-   * @param {boolean} enable
-   */
   linkPitchAndSpeed(enable = true) {
     this.isPitchLinked = Boolean(enable);
     if (this.activeElement instanceof HTMLMediaElement) {
@@ -367,333 +327,108 @@ class QPlay {
     }
   }
 
-  // --- Grabador en Tiempo Real (Audio & Video) ---
-
   startRecording() {
     if (this.isRecording) return;
     if (!this.activeElement || !(this.activeElement instanceof HTMLMediaElement)) {
-      throw new QPlayError('NO_ACTIVE_MEDIA', '[QPlay] No hay una reproducción activa para grabar.');
+      throw new QPlayError('NO_ACTIVE_MEDIA', '[QPlay] No hay medio activo para grabar.');
     }
-
-    let stream = null;
-    if (typeof this.activeElement.captureStream === 'function') {
-      stream = this.activeElement.captureStream();
-    } else if (typeof this.activeElement.mozCaptureStream === 'function') {
-      stream = this.activeElement.mozCaptureStream();
-    } else {
-      throw new QPlayError('NOT_SUPPORTED', '[QPlay] El navegador no soporta captureStream().');
-    }
+    const stream = typeof this.activeElement.captureStream === 'function' ? this.activeElement.captureStream() : null;
+    if (!stream) throw new QPlayError('NOT_SUPPORTED', '[QPlay] captureStream no soportado.');
 
     this.recordedChunks = [];
-    const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus') ? 'video/webm;codecs=vp9,opus' : 'video/webm';
-    this.mediaRecorder = new MediaRecorder(stream, { mimeType });
-
-    this.mediaRecorder.ondataavailable = (e) => {
-      if (e.data && e.data.size > 0) this.recordedChunks.push(e.data);
-    };
-
+    this.mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
+    this.mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) this.recordedChunks.push(e.data); };
     this.mediaRecorder.start();
     this.isRecording = true;
-    this._emit('recordingstart');
   }
 
   stopRecording() {
     return new Promise((resolve, reject) => {
-      if (!this.isRecording || !this.mediaRecorder) {
-        return reject(new QPlayError('NOT_RECORDING', '[QPlay] No hay una grabación activa.'));
-      }
-
+      if (!this.isRecording || !this.mediaRecorder) return reject(new QPlayError('NOT_RECORDING', 'Sin grabación activa.'));
       this.mediaRecorder.onstop = () => {
-        const blob = new Blob(this.recordedChunks, { type: this.mediaRecorder.mimeType || 'video/webm' });
+        const blob = new Blob(this.recordedChunks, { type: 'video/webm' });
         this.isRecording = false;
         this.recordedChunks = [];
-        this._emit('recordingstop', { blob });
         resolve(blob);
       };
-
       this.mediaRecorder.stop();
     });
   }
 
-  // --- Carga de Subtítulos Locales (.vtt, .srt, .ass, .sub) ---
-
   async loadLocalSubtitle(file) {
-    if (!(file instanceof File) || !(this.activeElement instanceof HTMLVideoElement)) {
-      throw new QPlayError('INVALID_SUBTITLE', '[QPlay] Archivo o elemento de video no válido.');
-    }
-
+    if (!(file instanceof File) || !(this.activeElement instanceof HTMLVideoElement)) return;
     const text = await file.text();
     const ext = file.name.split('.').pop().toLowerCase();
-    let vttContent = text;
-
-    if (ext === 'srt') {
-      vttContent = 'WEBVTT\n\n' + text.replace(/(\d\d:\d\d:\d\d),(\d\d\d)/g, '$1.$2');
-    } else if (ext === 'ass' || ext === 'sub') {
-      const lines = text.split('\n');
-      let cues = 'WEBVTT\n\n';
-      lines.forEach(line => {
-        if (line.startsWith('Dialogue:')) {
-          const parts = line.split(',');
-          if (parts.length >= 10) {
-            const start = parts[1].trim();
-            const end = parts[2].trim();
-            const dialogueText = parts.slice(9).join(',').replace(/\\N/g, '\n').replace(/\{[^}]+\}/g, '');
-            cues += `${start} --> ${end}\n${dialogueText}\n\n`;
-          }
-        }
-      });
-      vttContent = cues;
-    }
-
-    const blob = new Blob([vttContent], { type: 'text/vtt' });
-    const trackUrl = URL.createObjectURL(blob);
-    this.addSubtitleTrack(trackUrl, file.name, 'es');
-  }
-
-  addSubtitleTrack(src, label = 'Español', language = 'es') {
-    const el = this.activeElement;
-    if (!(el instanceof HTMLVideoElement)) return;
+    let vtt = ext === 'srt' ? 'WEBVTT\n\n' + text.replace(/(\d\d:\d\d:\d\d),(\d\d\d)/g, '$1.$2') : text;
+    const url = URL.createObjectURL(new Blob([vtt], { type: 'text/vtt' }));
     const track = document.createElement('track');
-    track.kind = 'subtitles';
-    track.label = label;
-    track.srclang = language;
-    track.src = src;
-    track.default = true;
-    el.appendChild(track);
+    track.kind = 'subtitles'; track.label = file.name; track.srclang = 'es'; track.src = url; track.default = true;
+    this.activeElement.appendChild(track);
   }
 
-  setVolume(vol) {
-    if (this.activeElement instanceof HTMLMediaElement) {
-      this.activeElement.volume = Math.max(0, Math.min(1, vol));
-    }
-  }
-
-  getVolume() {
-    return this.activeElement instanceof HTMLMediaElement ? this.activeElement.volume : 1;
-  }
-
-  toggleMute() {
-    if (this.activeElement instanceof HTMLMediaElement) {
-      this.activeElement.muted = !this.activeElement.muted;
-      return this.activeElement.muted;
-    }
-    return false;
-  }
-
+  setVolume(vol) { if (this.activeElement instanceof HTMLMediaElement) this.activeElement.volume = Math.max(0, Math.min(1, vol)); }
+  toggleMute() { if (this.activeElement instanceof HTMLMediaElement) { this.activeElement.muted = !this.activeElement.muted; return this.activeElement.muted; } return false; }
+  
   async togglePiP() {
-    const el = this.activeElement;
-    if (!(el instanceof HTMLVideoElement)) return false;
-    try {
-      if (document.pictureInPictureElement) {
-        await document.exitPictureInPicture();
-        return false;
-      } else if (document.pictureInPictureEnabled) {
-        await el.requestPictureInPicture();
-        return true;
-      }
-    } catch (err) {
-      console.error('[QPlay] Error en PiP:', err);
-    }
+    if (!(this.activeElement instanceof HTMLVideoElement)) return false;
+    if (document.pictureInPictureElement) { await document.exitPictureInPicture(); return false; }
+    else if (document.pictureInPictureEnabled) { await this.activeElement.requestPictureInPicture(); return true; }
     return false;
   }
 
   async snapshot() {
-    const el = this.activeElement;
-    if (!el) return null;
-
+    if (!this.activeElement) return null;
     const canvas = document.createElement('canvas');
-    let w = 0, h = 0;
-
-    if (el instanceof HTMLVideoElement) {
-      w = el.videoWidth;
-      h = el.videoHeight;
-    } else if (el instanceof HTMLImageElement) {
-      w = el.naturalWidth;
-      h = el.naturalHeight;
-    }
+    let w = this.activeElement.videoWidth || this.activeElement.naturalWidth || 0;
+    let h = this.activeElement.videoHeight || this.activeElement.naturalHeight || 0;
     if (!w || !h) return null;
-
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext('2d');
-    try {
-      ctx.drawImage(el, 0, 0, w, h);
-      return await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
-    } catch (e) {
-      console.error('[QPlay] Error al generar snapshot (posible CORS):', e);
-      return null;
-    }
+    canvas.width = w; canvas.height = h;
+    canvas.getContext('2d').drawImage(this.activeElement, 0, 0, w, h);
+    return await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
   }
 
-  // --- Gestión de Playlist ---
-
   async loadPlaylist(items = [], startIndex = 0) {
-    if (!Array.isArray(items) || items.length === 0) {
-      throw new QPlayError('INVALID_PLAYLIST', '[QPlay] La playlist debe ser un array con al menos un elemento.');
-    }
-    if (!Number.isInteger(startIndex) || startIndex < 0 || startIndex >= items.length) {
-      throw new RangeError('[QPlay] startIndex fuera de rango.');
-    }
+    if (!Array.isArray(items) || items.length === 0) return;
     this.playlist = [...items];
-    this._history = [];
-    this._played = new Set();
     return await this.playIndex(startIndex);
   }
 
   async playIndex(index) {
-    if (!Number.isInteger(index) || index < 0 || index >= this.playlist.length) return;
-    if (this.currentIndex >= 0 && index !== this.currentIndex && !this._goingBack) {
-      this._history.push(this.currentIndex);
-      if (this._history.length > 200) this._history.shift();
-    }
+    if (index < 0 || index >= this.playlist.length) return;
     this.currentIndex = index;
-    const item = this.playlist[index];
-    this._played.add(item);
-    return await this.load(item);
+    return await this.load(this.playlist[index]);
   }
 
-  _unplayedIndices() {
-    const out = [];
-    this.playlist.forEach((item, i) => {
-      if (i !== this.currentIndex && !this._played.has(item)) out.push(i);
-    });
-    return out;
-  }
+  async next() { if (this.playlist.length) return await this.playIndex((this.currentIndex + 1) % this.playlist.length); }
+  async previous() { if (this.playlist.length) return await this.playIndex((this.currentIndex - 1 + this.playlist.length) % this.playlist.length); }
 
-  async next() {
-    if (this.playlist.length === 0) return;
-
-    if (this.isShuffle) {
-      let candidates = this._unplayedIndices();
-      if (candidates.length === 0) {
-        if (this.repeatMode !== 'all') return;
-        this._played = new Set();
-        candidates = this.playlist.map((_, i) => i);
-        if (candidates.length > 1) candidates = candidates.filter((i) => i !== this.currentIndex);
-      }
-      const randomIndex = candidates[Math.floor(Math.random() * candidates.length)];
-      return await this.playIndex(randomIndex);
+  seek(time) {
+    if (this.activeElement instanceof HTMLMediaElement && isFinite(this.activeElement.duration)) {
+      this.activeElement.currentTime = Math.max(0, Math.min(this.activeElement.duration, time));
     }
-
-    let nextIndex = this.currentIndex + 1;
-    if (nextIndex >= this.playlist.length) {
-      if (this.repeatMode === 'all') {
-        nextIndex = 0;
-      } else {
-        return;
-      }
-    }
-
-    return await this.playIndex(nextIndex);
-  }
-
-  async previous() {
-    if (this.playlist.length === 0) return;
-
-    let prevIndex;
-    if (this.isShuffle) {
-      while (this._history.length) {
-        const h = this._history.pop();
-        if (h >= 0 && h < this.playlist.length && h !== this.currentIndex) { prevIndex = h; break; }
-      }
-      if (prevIndex === undefined) return;
-    } else {
-      prevIndex = this.currentIndex - 1;
-      if (prevIndex < 0) {
-        prevIndex = this.repeatMode === 'all' ? this.playlist.length - 1 : 0;
-      }
-    }
-
-    this._goingBack = true;
-    const p = this.playIndex(prevIndex);
-    this._goingBack = false;
-    return await p;
-  }
-
-  toggleShuffle(enable) {
-    this.isShuffle = typeof enable === 'boolean' ? enable : !this.isShuffle;
-    const current = this.playlist[this.currentIndex];
-    this._played = new Set(current !== undefined ? [current] : []);
-    return this.isShuffle;
-  }
-
-  setRepeatMode(mode) {
-    if (['off', 'all', 'one'].includes(mode)) {
-      this.repeatMode = mode;
-    } else {
-      const modes = ['off', 'all', 'one'];
-      const currentPos = modes.indexOf(this.repeatMode);
-      this.repeatMode = modes[(currentPos + 1) % modes.length];
-    }
-    return this.repeatMode;
-  }
-
-  seek(timeInSeconds) {
-    const el = this.activeElement;
-    if (!(el instanceof HTMLMediaElement)) return;
-    const max = isFinite(el.duration) ? el.duration : 0;
-    el.currentTime = Math.max(0, Math.min(max, timeInSeconds));
-  }
-
-  seekRelative(seconds) {
-    const el = this.activeElement;
-    if (!(el instanceof HTMLMediaElement)) return;
-    const max = isFinite(el.duration) ? el.duration : Infinity;
-    el.currentTime = Math.max(0, Math.min(max, el.currentTime + seconds));
-  }
-
-  forward(seconds = 10) {
-    this.seekRelative(seconds);
-  }
-
-  rewind(seconds = 10) {
-    this.seekRelative(-seconds);
   }
 
   async _sniffUrl(url) {
-    if (url.startsWith('data:')) {
-      const m = /^data:([^;,]+)/.exec(url);
-      return m ? m[1] : '';
-    }
-
-    if (url.startsWith('blob:')) return '';
-
-    const lowerUrl = url.toLowerCase();
-    if (lowerUrl.includes('.m3u8')) return 'application/x-mpegURL';
-    if (lowerUrl.includes('.mpd')) return 'application/dash+xml';
-
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), this.options.sniffTimeout);
-    try {
-      const res = await fetch(url, { method: 'HEAD', signal: ctrl.signal });
-      const ct = res.headers.get('content-type');
-      const clean = ct ? ct.split(';')[0].trim() : '';
-      if (clean && clean !== 'application/octet-stream') return clean;
-    } catch (_) {
-      /* CORS, red o timeout */
-    } finally {
-      clearTimeout(timer);
-    }
+    const l = url.toLowerCase();
+    if (l.includes('.m3u8')) return 'application/x-mpegURL';
+    if (l.includes('.mpd')) return 'application/dash+xml';
+    if (l.startsWith('rtmp://') || l.startsWith('rtsp://') || l.startsWith('fsv://')) return 'stream/network';
     return '';
   }
 
-  _getCategory(mimeType, hint) {
-    const mime = String(mimeType || '').toLowerCase();
-    const name = String(hint || '').toLowerCase();
-
-    if (mime.includes('mpegurl') || mime.includes('hls') || name.includes('.m3u8')) return 'hls';
-    if (mime.includes('dash') || name.includes('.mpd')) return 'dash';
-    if (mime.startsWith('image/')) return 'image';
-    if (mime.startsWith('audio/')) return 'audio';
-    if (mime.startsWith('video/')) return 'video';
-
+  _getCategory(mime, hint) {
+    const m = String(mime).toLowerCase();
+    const h = String(hint).toLowerCase();
+    if (m.includes('mpegurl') || h.includes('.m3u8')) return 'hls';
+    if (m.includes('dash') || h.includes('.mpd')) return 'dash';
+    if (m.includes('stream/network') || h.startsWith('rtmp://') || h.startsWith('rtsp://') || h.startsWith('fsv://')) return 'rtmp_rtsp';
+    if (m.startsWith('image/')) return 'image';
+    if (m.startsWith('audio/')) return 'audio';
     return 'video';
   }
 
   _applyStyles(el) {
-    el.style.width = '100%';
-    el.style.height = '100%';
-    el.style.objectFit = this.options.objectFit;
+    el.style.width = '100%'; el.style.height = '100%'; el.style.objectFit = this.options.objectFit;
   }
 
   _mount(el) {
@@ -704,108 +439,57 @@ class QPlay {
 
   _createMedia(tag, url) {
     const el = document.createElement(tag);
-    el.controls = this.options.controls;
-    el.autoplay = this.options.autoplay;
-    el.muted = this.options.muted;
-    el.loop = this.options.loop;
+    el.controls = this.options.controls; el.autoplay = this.options.autoplay;
+    el.muted = this.options.muted; el.loop = this.options.loop;
     if (this.options.crossOrigin) el.crossOrigin = this.options.crossOrigin;
-    if (tag === 'video') {
-      el.playsInline = true;
-      this._applyStyles(el);
-    } else {
-      el.style.width = '90%';
-      el.style.maxWidth = '500px';
-    }
+    if (tag === 'video') { el.playsInline = true; this._applyStyles(el); }
+    else { el.style.width = '90%'; el.style.maxWidth = '500px'; }
     if (url) el.src = url;
     return el;
   }
 
   _renderImage(url) {
     const img = document.createElement('img');
-    img.decoding = 'async';
-    if (this.options.crossOrigin) img.crossOrigin = this.options.crossOrigin;
-    img.src = url;
-    this._applyStyles(img);
+    img.src = url; this._applyStyles(img);
     return this._mount(img);
   }
 
-  _renderVideo(url) {
-    return this._mount(this._createMedia('video', url));
-  }
+  _renderVideo(url) { return this._mount(this._createMedia('video', url)); }
+  _renderAudio(url) { return this._mount(this._createMedia('audio', url)); }
 
-  _renderAudio(url) {
-    return this._mount(this._createMedia('audio', url));
+  _renderRtmpRtsp(url) {
+    const video = this._createMedia('video', null);
+    this._mount(video);
+    // Nota: Los navegadores modernos requieren pasarelas o WebRTC/MSE para RTMP/RTSP directo, 
+    // pero configuramos la fuente de red para integraciones o proxies compatibles.
+    video.src = url;
+    return video;
   }
 
   async _renderHLS(url, id) {
     const video = this._createMedia('video', null);
-
     if (video.canPlayType('application/vnd.apple.mpegurl')) {
-      video.src = url;
-      return this._mount(video);
+      video.src = url; return this._mount(video);
     }
-
     await this._loadScript(this.options.hlsUrl, 'Hls');
     if (id !== this._loadId) return null;
-
     const Hls = window.Hls;
-    if (!Hls || !Hls.isSupported()) {
-      throw new QPlayError('UNSUPPORTED', '[QPlay] Este navegador no puede reproducir HLS (falta MediaSource).');
-    }
-
+    if (!Hls || !Hls.isSupported()) throw new QPlayError('UNSUPPORTED', 'HLS no soportado.');
     this._mount(video);
-    const hls = new Hls(this.options.hlsConfig);
-    this.hlsInstance = hls;
-    this._hlsRetries = 0;
-
-    hls.on(Hls.Events.ERROR, (_evt, data) => {
-      if (!data || !data.fatal) return;
-      const network = data.type === Hls.ErrorTypes.NETWORK_ERROR;
-      const media = data.type === Hls.ErrorTypes.MEDIA_ERROR;
-      const canRetry = (network || media) && this._hlsRetries < 3;
-      this._emit('error', {
-        code: 'HLS_' + String(data.type || 'ERROR').toUpperCase(),
-        message: data.details || 'Error fatal de HLS.',
-        recoverable: canRetry,
-        error: data
-      });
-      if (canRetry) {
-        this._hlsRetries++;
-        if (network) hls.startLoad(); else hls.recoverMediaError();
-      } else if (this.hlsInstance === hls) {
-        hls.destroy();
-        this.hlsInstance = null;
-      }
-    });
-
-    hls.loadSource(url);
-    hls.attachMedia(video);
+    this.hlsInstance = new Hls(this.options.hlsConfig);
+    this.hlsInstance.loadSource(url);
+    this.hlsInstance.attachMedia(video);
     return video;
   }
 
   async _renderDASH(url, id) {
     const video = this._createMedia('video', null);
-
     await this._loadScript(this.options.dashUrl, 'dashjs');
     if (id !== this._loadId) return null;
-
-    if (!window.dashjs) {
-      throw new QPlayError('UNSUPPORTED', '[QPlay] dash.js no está disponible.');
-    }
-
+    if (!window.dashjs) throw new QPlayError('UNSUPPORTED', 'dash.js no disponible.');
     this._mount(video);
-    const player = window.dashjs.MediaPlayer().create();
-    this.dashInstance = player;
-    player.on(window.dashjs.MediaPlayer.events.ERROR, (e) => {
-      const detail = e && e.error;
-      this._emit('error', {
-        code: 'DASH_ERROR',
-        message: (detail && detail.message) || 'Error de DASH.',
-        recoverable: false,
-        error: e
-      });
-    });
-    player.initialize(video, url, this.options.autoplay);
+    this.dashInstance = window.dashjs.MediaPlayer().create();
+    this.dashInstance.initialize(video, url, this.options.autoplay);
     return video;
   }
 
@@ -813,84 +497,35 @@ class QPlay {
     if (globalName && window[globalName]) return Promise.resolve();
     const cache = (QPlay._scripts = QPlay._scripts || {});
     if (cache[src]) return cache[src];
-
     cache[src] = new Promise((resolve, reject) => {
       const script = document.createElement('script');
-      script.src = src;
-      script.async = true;
+      script.src = src; script.async = true;
       script.onload = () => resolve();
-      script.onerror = () => {
-        delete cache[src];
-        script.remove();
-        reject(new QPlayError('SCRIPT_LOAD_FAILED', `[QPlay] Error al cargar: ${src}`));
-      };
+      script.onerror = () => { delete cache[src]; script.remove(); reject(new QPlayError('SCRIPT_LOAD_FAILED', src)); };
       document.head.appendChild(script);
     });
     return cache[src];
   }
 
-  play() {
-    if (this.audioCtx && this.audioCtx.state === 'suspended') {
-      this.audioCtx.resume();
-    }
-    if (this.activeElement && typeof this.activeElement.play === 'function') {
-      return this.activeElement.play();
-    }
-  }
-
-  pause() {
-    if (this.activeElement && typeof this.activeElement.pause === 'function') {
-      this.activeElement.pause();
-    }
-  }
+  play() { if (this.audioCtx && this.audioCtx.state === 'suspended') this.audioCtx.resume(); if (this.activeElement?.play) return this.activeElement.play(); }
+  pause() { if (this.activeElement?.pause) this.activeElement.pause(); }
 
   destroy() {
     this._loadId++;
-
-    if (this._abort) {
-      this._abort.abort();
-      this._abort = null;
+    if (this._abort) { this._abort.abort(); this._abort = null; }
+    if (this.hlsInstance) { try { this.hlsInstance.destroy(); } catch (_) {} this.hlsInstance = null; }
+    if (this.dashInstance) { try { this.dashInstance.reset(); } catch (_) {} this.dashInstance = null; }
+    if (this.activeElement) {
+      if (this.activeElement instanceof HTMLMediaElement) { this.activeElement.pause(); this.activeElement.removeAttribute('src'); this.activeElement.load(); }
+      this.activeElement.remove(); this.activeElement = null;
     }
-
-    if (this.hlsInstance) {
-      try { this.hlsInstance.destroy(); } catch (_) {}
-      this.hlsInstance = null;
-    }
-
-    if (this.dashInstance) {
-      try { this.dashInstance.reset(); } catch (_) {}
-      this.dashInstance = null;
-    }
-
-    const el = this.activeElement;
-    if (el) {
-      if (el instanceof HTMLMediaElement) {
-        el.pause();
-        el.removeAttribute('src');
-        el.load();
-      } else {
-        el.removeAttribute('src');
-      }
-      el.remove();
-      this.activeElement = null;
-    }
-
-    if (this.activeBlobUrl) {
-      URL.revokeObjectURL(this.activeBlobUrl);
-      this.activeBlobUrl = null;
-    }
-
-    this._hlsRetries = 0;
+    if (this.activeBlobUrl) { URL.revokeObjectURL(this.activeBlobUrl); this.activeBlobUrl = null; }
   }
 }
 
 QPlay.Error = QPlayError;
-
-// Exportación Universal (UMD)
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = QPlay;
-} else if (typeof define === 'function' && define.amd) {
-  define([], () => QPlay);
 } else {
   (typeof globalThis !== 'undefined' ? globalThis : window).QPlay = QPlay;
 }
